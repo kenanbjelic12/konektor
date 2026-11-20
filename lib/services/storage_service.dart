@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as p;
 
 /// One file stored in the cloud.
 class CloudFile {
@@ -12,6 +11,9 @@ class CloudFile {
   final int? size;
   final DateTime? updatedAt;
 }
+
+/// Called with bytes done so far and the total (null when unknown).
+typedef ProgressCallback = void Function(int done, int? total);
 
 class StorageException implements Exception {
   StorageException(this.message);
@@ -59,27 +61,52 @@ class StorageService {
     return result;
   }
 
-  /// Uploads a local file. A cloud file with the same name is replaced.
-  Future<void> upload(File file) async {
+  /// Uploads [length] bytes from [data] as [name]. A cloud file with the
+  /// same name is replaced. [onProgress] gets the bytes sent so far.
+  Future<void> upload({
+    required String name,
+    required int length,
+    required Stream<List<int>> data,
+    ProgressCallback? onProgress,
+  }) async {
+    var sent = 0;
+    final counted = data.map((chunk) {
+      sent += chunk.length;
+      onProgress?.call(sent, length);
+      return chunk;
+    });
     final req = http.MultipartRequest('POST', _uri('upload'))
       ..headers.addAll(_headers)
-      ..fields['name'] = p.basename(file.path)
-      ..files.add(await http.MultipartFile.fromPath('file', file.path));
+      ..fields['name'] = name
+      ..files.add(http.MultipartFile('file', counted, length, filename: name));
     final res = await _client.send(req);
     _check(res.statusCode, await res.stream.bytesToString());
   }
 
   /// Streams a cloud file straight to [target] on disk.
-  Future<void> download(String name, File target) async {
+  /// [onProgress] gets the bytes received so far and the total size.
+  Future<void> download(
+    String name,
+    File target, {
+    ProgressCallback? onProgress,
+  }) async {
     final req = http.Request('GET', _uri('download', name))
       ..headers.addAll(_headers);
     final res = await _client.send(req);
     if (res.statusCode != 200) {
       _check(res.statusCode, await res.stream.bytesToString());
     }
+    final total = res.contentLength;
+    var received = 0;
     final sink = target.openWrite();
     try {
-      await res.stream.pipe(sink);
+      await res.stream
+          .map((chunk) {
+            received += chunk.length;
+            onProgress?.call(received, total);
+            return chunk;
+          })
+          .pipe(sink);
     } catch (_) {
       await sink.close();
       if (await target.exists()) await target.delete();

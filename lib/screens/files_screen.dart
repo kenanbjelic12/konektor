@@ -26,6 +26,10 @@ class _FilesScreenState extends State<FilesScreen> {
   bool _loading = true;
   String? _status;
 
+  /// 0..1 while a transfer is running, null when its size is unknown.
+  double? _progress;
+  String _progressText = '';
+
   @override
   void initState() {
     super.initState();
@@ -44,25 +48,58 @@ class _FilesScreenState extends State<FilesScreen> {
     }
   }
 
+  void _startTransfer(String status) => setState(() {
+    _status = status;
+    _progress = 0;
+    _progressText = '';
+  });
+
+  void _endTransfer() {
+    if (mounted) setState(() => _status = null);
+  }
+
+  /// Progress callback that only rebuilds when the shown percent changes.
+  void _onProgress(int done, int? total) {
+    if (!mounted) return;
+    final value = total == null || total == 0 ? null : done / total;
+    final text = total == null
+        ? _formatSize(done)
+        : '${_formatSize(done)} of ${_formatSize(total)}';
+    if (value != null &&
+        _progress != null &&
+        (value * 100).floor() == (_progress! * 100).floor() &&
+        value < 1) {
+      return;
+    }
+    setState(() {
+      _progress = value;
+      _progressText = text;
+    });
+  }
+
   Future<void> _upload() async {
     final picked = await FilePicker.pickFiles(
       dialogTitle: 'Choose files to upload',
     );
-    final paths = picked.map((f) => f.path).whereType<String>().toList();
-    if (paths.isEmpty) return;
-    for (var i = 0; i < paths.length; i++) {
-      final file = File(paths[i]);
-      setState(
-        () => _status =
-            'Uploading ${file.uri.pathSegments.last} (${i + 1} of ${paths.length})',
-      );
+    if (picked.isEmpty) return;
+    for (var i = 0; i < picked.length; i++) {
+      final file = picked[i];
+      final count = picked.length > 1 ? ' (${i + 1} of ${picked.length})' : '';
+      _startTransfer('Uploading ${file.name}$count');
       try {
-        await _storage.upload(file);
+        final length = await file.length();
+        if (length == null) throw StorageException('Cannot read file size');
+        await _storage.upload(
+          name: file.name,
+          length: length,
+          data: file.readAsByteStream(),
+          onProgress: _onProgress,
+        );
       } catch (e) {
-        _showError('Upload failed for ${file.uri.pathSegments.last}: $e');
+        _showError('Upload failed for ${file.name}: $e');
       }
     }
-    setState(() => _status = null);
+    _endTransfer();
     await _refresh();
   }
 
@@ -70,22 +107,55 @@ class _FilesScreenState extends State<FilesScreen> {
   String? _lastFolder;
 
   Future<void> _download(CloudFile file) async {
-    final folderUri = await FilePicker.pickDirectory(
-      dialogTitle: 'Choose where to save ${file.name}',
-      initialDirectory: _lastFolder,
-    );
-    if (folderUri == null || folderUri.scheme != 'file') return;
-    final folder = folderUri.toFilePath();
-    _lastFolder = folder;
-    final target = File(_uniquePath(folder, file.name));
-    setState(() => _status = 'Downloading ${file.name}');
+    final String folder;
+    if (Platform.isAndroid) {
+      folder = await _androidDownloadFolder() ?? '';
+    } else {
+      final folderUri = await FilePicker.pickDirectory(
+        dialogTitle: 'Choose where to save ${file.name}',
+        initialDirectory: _lastFolder,
+      );
+      if (folderUri == null || folderUri.scheme != 'file') return;
+      folder = folderUri.toFilePath();
+      _lastFolder = folder;
+    }
+    _startTransfer('Downloading ${file.name}');
     try {
-      await _storage.download(file.name, target);
-      _showMessage('Saved to ${target.path}');
+      if (folder.isEmpty) {
+        // Older Android: download to a temp file, then let the system
+        // "save as" dialog put it where the user wants.
+        final temp = File(p.join(Directory.systemTemp.path, file.name));
+        await _storage.download(file.name, temp, onProgress: _onProgress);
+        final saved = await FilePicker.saveFile(
+          fileName: file.name,
+          bytes: await temp.readAsBytes(),
+        );
+        await temp.delete();
+        if (saved != null) _showMessage('Saved ${file.name}');
+      } else {
+        final target = File(_uniquePath(folder, file.name));
+        await _storage.download(file.name, target, onProgress: _onProgress);
+        _showMessage('Saved to ${target.path}');
+      }
     } catch (e) {
       _showError('Download failed: $e');
     } finally {
-      if (mounted) setState(() => _status = null);
+      _endTransfer();
+    }
+  }
+
+  /// Download/Konektor on the phone's shared storage. Android 11+ lets apps
+  /// create files there without any permission. Returns null if not possible.
+  static Future<String?> _androidDownloadFolder() async {
+    try {
+      final dir = Directory('/storage/emulated/0/Download/Konektor');
+      await dir.create(recursive: true);
+      final probe = File(p.join(dir.path, '.konektor-write-test'));
+      await probe.writeAsString('ok');
+      await probe.delete();
+      return dir.path;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -160,7 +230,7 @@ class _FilesScreenState extends State<FilesScreen> {
             onPressed: () => widget.onOpenSettings(context),
           ),
         ],
-        bottom: busy || _loading
+        bottom: !busy && _loading
             ? const PreferredSize(
                 preferredSize: Size.fromHeight(4),
                 child: LinearProgressIndicator(),
@@ -174,10 +244,44 @@ class _FilesScreenState extends State<FilesScreen> {
       ),
       body: Column(
         children: [
-          if (_status != null)
-            Padding(padding: const EdgeInsets.all(8), child: Text(_status!)),
+          if (_status != null) _buildTransferCard(),
           Expanded(child: _buildList()),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTransferCard() {
+    final percent = _progress == null
+        ? ''
+        : '${(_progress! * 100).clamp(0, 100).toStringAsFixed(0)}%';
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(_status!, overflow: TextOverflow.ellipsis),
+                ),
+                Text(percent, style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(
+              value: _progress,
+              minHeight: 8,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            if (_progressText.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(_progressText, style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ],
+        ),
       ),
     );
   }

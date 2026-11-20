@@ -1,8 +1,8 @@
 # Konektor
 
 Upload and download your files between all your devices, using your own
-Hostinger web hosting as the cloud. Windows first; the app is built with
-Flutter so Android and iOS can follow from the same code.
+Hostinger web hosting as the cloud. Runs on Windows and Android from one
+Flutter codebase (iOS can follow).
 
 This first version is manual: you press **Upload** to send files to your
 hosting and **Download** to save a file to a folder you choose. There is no
@@ -52,6 +52,21 @@ flutter run -d windows            # try it
 flutter build windows --release   # app ends up in build\windows\x64\runner\Release
 ```
 
+## 2b. Get the Android app
+
+Every push to `main` also builds `Konektor.apk` and attaches it to the
+**latest** release: open the repo's **Releases** page on your phone (signed in
+to GitHub), download `Konektor.apk`, and open it. Android asks you to allow
+installing apps from your browser the first time.
+
+On the phone, **Download** saves files to `Download/Konektor`. On older phones
+(Android 10 and below) it shows a "save as" screen instead.
+
+The APK is signed with a temporary key, so installing a newer build may ask
+you to uninstall the old one first. To avoid that, add two repository
+secrets, `ANDROID_KEYSTORE_BASE64` (a base64-encoded keystore with key alias
+`konektor`) and `ANDROID_KEYSTORE_PASSWORD`, and the build will use them.
+
 ## 3. First run
 
 The app asks for:
@@ -78,6 +93,5 @@ address and token, and they all see the same files.
 ## Next ideas
 
 - Folders, and uploading by drag and drop
-- Upload and download progress bars for large files
-- Android and iOS builds from the same code
+- iOS build from the same code
 - Automatic sync of a chosen folder
