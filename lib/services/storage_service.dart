@@ -92,27 +92,50 @@ class StorageService {
   }) async {
     final req = http.Request('GET', _uri('download', name))
       ..headers.addAll(_headers);
-    final res = await _client.send(req);
+    final res = await _client
+        .send(req)
+        .timeout(
+          _stallTimeout,
+          onTimeout: () => throw StorageException(
+            'The server did not answer within ${_stallTimeout.inSeconds} s.',
+          ),
+        );
     if (res.statusCode != 200) {
       _check(res.statusCode, await res.stream.bytesToString());
     }
     final total = res.contentLength;
     var received = 0;
+    onProgress?.call(0, total);
     final sink = target.openWrite();
     try {
       await res.stream
+          .timeout(
+            _stallTimeout,
+            onTimeout: (sink) => sink.addError(
+              StorageException(
+                'Download stopped: no data for ${_stallTimeout.inSeconds} s.',
+              ),
+            ),
+          )
           .map((chunk) {
             received += chunk.length;
             onProgress?.call(received, total);
             return chunk;
           })
           .pipe(sink);
+      if (total != null && received != total) {
+        throw StorageException(
+          'Download incomplete: got $received of $total bytes.',
+        );
+      }
     } catch (_) {
-      await sink.close();
+      await sink.close().catchError((_) {});
       if (await target.exists()) await target.delete();
       rethrow;
     }
   }
+
+  static const _stallTimeout = Duration(seconds: 30);
 
   Future<void> delete(String name) async {
     final res = await _client.post(_uri('delete', name), headers: _headers);

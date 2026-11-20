@@ -98,11 +98,24 @@ switch ($action) {
         $name = safe_name($_GET['name'] ?? null);
         $path = "$dir/$name";
         if (!is_file($path)) fail(404, 'File not found');
+        // Send the file in chunks without compression or buffering, so the
+        // app sees progress right away and gets an exact Content-Length.
+        @ini_set('zlib.output_compression', 'Off');
+        @ini_set('output_buffering', '0');
+        @set_time_limit(0);
         while (ob_get_level()) ob_end_clean();
         header('Content-Type: application/octet-stream');
         header('Content-Length: ' . filesize($path));
+        header('Content-Encoding: identity');
+        header('Cache-Control: no-store');
+        header('X-Accel-Buffering: no');
         header('Content-Disposition: attachment; filename="' . rawurlencode($name) . '"');
-        readfile($path);
+        $fh = fopen($path, 'rb');
+        while (!feof($fh)) {
+            echo fread($fh, 1024 * 1024);
+            flush();
+        }
+        fclose($fh);
         exit;
 
     case 'delete':

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../services/storage_service.dart';
 
@@ -51,7 +52,7 @@ class _FilesScreenState extends State<FilesScreen> {
   void _startTransfer(String status) => setState(() {
     _status = status;
     _progress = 0;
-    _progressText = '';
+    _progressText = 'Waiting for the server...';
   });
 
   void _endTransfer() {
@@ -62,7 +63,9 @@ class _FilesScreenState extends State<FilesScreen> {
   void _onProgress(int done, int? total) {
     if (!mounted) return;
     final value = total == null || total == 0 ? null : done / total;
-    final text = total == null
+    final text = done == 0
+        ? 'Waiting for the server...'
+        : total == null
         ? _formatSize(done)
         : '${_formatSize(done)} of ${_formatSize(total)}';
     if (value != null &&
@@ -107,36 +110,19 @@ class _FilesScreenState extends State<FilesScreen> {
   String? _lastFolder;
 
   Future<void> _download(CloudFile file) async {
-    final String folder;
-    if (Platform.isAndroid) {
-      folder = await _androidDownloadFolder() ?? '';
-    } else {
-      final folderUri = await FilePicker.pickDirectory(
-        dialogTitle: 'Choose where to save ${file.name}',
-        initialDirectory: _lastFolder,
-      );
-      if (folderUri == null || folderUri.scheme != 'file') return;
-      folder = folderUri.toFilePath();
-      _lastFolder = folder;
-    }
+    if (Platform.isAndroid) return _downloadAndroid(file);
+    final folderUri = await FilePicker.pickDirectory(
+      dialogTitle: 'Choose where to save ${file.name}',
+      initialDirectory: _lastFolder,
+    );
+    if (folderUri == null || folderUri.scheme != 'file') return;
+    final folder = folderUri.toFilePath();
+    _lastFolder = folder;
     _startTransfer('Downloading ${file.name}');
     try {
-      if (folder.isEmpty) {
-        // Older Android: download to a temp file, then let the system
-        // "save as" dialog put it where the user wants.
-        final temp = File(p.join(Directory.systemTemp.path, file.name));
-        await _storage.download(file.name, temp, onProgress: _onProgress);
-        final saved = await FilePicker.saveFile(
-          fileName: file.name,
-          bytes: await temp.readAsBytes(),
-        );
-        await temp.delete();
-        if (saved != null) _showMessage('Saved ${file.name}');
-      } else {
-        final target = File(_uniquePath(folder, file.name));
-        await _storage.download(file.name, target, onProgress: _onProgress);
-        _showMessage('Saved to ${target.path}');
-      }
+      final target = File(_uniquePath(folder, file.name));
+      await _storage.download(file.name, target, onProgress: _onProgress);
+      _showMessage('Saved to ${target.path}');
     } catch (e) {
       _showError('Download failed: $e');
     } finally {
@@ -144,18 +130,39 @@ class _FilesScreenState extends State<FilesScreen> {
     }
   }
 
-  /// Download/Konektor on the phone's shared storage. Android 11+ lets apps
-  /// create files there without any permission. Returns null if not possible.
-  static Future<String?> _androidDownloadFolder() async {
+  /// Android: download into the app's own cache first (always writable),
+  /// then copy to Download/Konektor. If the phone does not allow that, the
+  /// system "save as" screen lets the user pick a place.
+  Future<void> _downloadAndroid(CloudFile file) async {
+    _startTransfer('Downloading ${file.name}');
+    File? temp;
     try {
-      final dir = Directory('/storage/emulated/0/Download/Konektor');
-      await dir.create(recursive: true);
-      final probe = File(p.join(dir.path, '.konektor-write-test'));
-      await probe.writeAsString('ok');
-      await probe.delete();
-      return dir.path;
-    } catch (_) {
-      return null;
+      final cache = await getTemporaryDirectory();
+      temp = File(p.join(cache.path, 'download-${file.name}'));
+      await _storage.download(file.name, temp, onProgress: _onProgress);
+
+      setState(() {
+        _status = 'Saving ${file.name}';
+        _progress = null;
+      });
+      try {
+        final dir = Directory('/storage/emulated/0/Download/Konektor');
+        await dir.create(recursive: true);
+        final target = _uniquePath(dir.path, file.name);
+        await temp.copy(target);
+        _showMessage('Saved to Download/Konektor/${p.basename(target)}');
+      } catch (_) {
+        final saved = await FilePicker.saveFile(
+          fileName: file.name,
+          bytes: await temp.readAsBytes(),
+        );
+        if (saved != null) _showMessage('Saved ${file.name}');
+      }
+    } catch (e) {
+      _showError('Download failed: $e');
+    } finally {
+      if (temp != null && await temp.exists()) await temp.delete();
+      _endTransfer();
     }
   }
 
