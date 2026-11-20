@@ -100,7 +100,10 @@ class StorageService {
     if (status == 200 && json != null) return json;
     final message =
         json?['error'] as String? ??
-        'Server answered $status. Check the API address in config.json.';
+        (status == 404
+            ? 'api.php was not found at ${_api.origin}${_api.path} (404). '
+                  'Check that api.php is in that folder on your hosting.'
+            : 'Server answered $status. Check the server address.');
     throw StorageException(message);
   }
 }
